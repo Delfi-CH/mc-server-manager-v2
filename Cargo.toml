@@ -3,8 +3,6 @@ name = "mc-server-manager-v2"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-
 [[bin]]
 name = "cli"
 path = "src/cli.rs"
@@ -24,3 +22,9 @@ path = "src/server.rs"
 [lib]
 name = "app_lib"
 path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+ureq = {version = "3.1.4", features = ["json"]}
+
