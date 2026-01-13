@@ -424,3 +424,116 @@ fn download_fabric_installer(path: String, term: bool) -> Result<(), LibError> {
 // Paper Server
 //
 
+#[derive(Debug, Deserialize)]
+pub struct PaperProjectVersions {
+    pub project_id: String,
+    pub project_name: String,
+    pub versions: Vec<String>,
+    pub builds: Option<Vec<u32>>,
+}
+#[derive(Debug, Deserialize)]
+pub struct PaperProjectBuilds {
+    pub project_id: String,
+    pub project_name: String,
+    pub builds: Option<Vec<u32>>,
+}
+
+pub fn download_paper_server(ver: String, path:String, term: bool, folia: bool) -> Result<(), LibError>{
+
+    let build = download_paper_fetch_latest_build(ver.clone(), folia)?;
+    if build != 0 {
+
+        //The Download
+        let mut downlad_url = "".to_owned();
+        if folia {
+            downlad_url = format!("https://api.papermc.io/v2/projects/folia/versions/{ver}/builds/{build}/downloads/folia-{ver}-{build}.jar");
+        } else {
+            downlad_url =  format!("https://api.papermc.io/v2/projects/paper/versions/{ver}/builds/{build}/downloads/paper-{ver}-{build}.jar");
+        };
+
+        let mut response = ureq::get(downlad_url).call()?;
+        
+        let mut reader = response.body_mut().as_reader();
+        let save_path = Path::new(&path).join("server.jar");
+        let mut server_jar = File::create(save_path)?;
+
+        let progress = if term {
+            Some(ProgressBar::new_spinner())
+        } else {
+            None
+        };        
+
+        if let Some(pb) = &progress {
+            pb.enable_steady_tick(Duration::from_millis(100));
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                .tick_chars("|/-\\")
+                .template(
+                    "{bytes} ({bytes_per_sec}, {eta})"
+                )
+                .unwrap()
+            );
+
+        }
+
+        let mut buffer = [0u8; 8 * 1024];
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            server_jar.write_all(&buffer[..n])?;
+            if let Some(pb) = &progress {
+                pb.inc(n as u64);
+            }
+        }
+        if let Some (pb) = &progress {
+        pb.finish();
+        }
+        Ok(())
+    } else {
+        return Err(LibError::Ver(ver));
+    }
+}
+
+fn download_paper_fetch_latest_build(ver: String, folia: bool) -> Result<u32, LibError> {
+    let project = download_paper_fetch_versions(folia)?;
+
+    let mut result: u32 = 0;
+    for v in project.versions {
+        if v == ver {
+            let url = if folia {
+                "https://api.papermc.io/v2/projects/folia/versions/"
+            } else {
+                "https://api.papermc.io/v2/projects/paper/versions/"
+            };
+            let mut response = ureq::get(url.to_owned()+&ver)
+            .call()?;
+            
+            let body = response.body_mut();
+            let text = body.read_to_string()?;
+            let project2: PaperProjectBuilds = serde_json::from_str(&text).unwrap();
+            if let Some(builds) = project2.builds {
+                result = builds[builds.len()-1]
+            }
+        }
+    }
+    return Ok(result);
+}
+
+
+fn download_paper_fetch_versions(folia: bool) -> Result<(PaperProjectVersions), LibError> {
+    let url = if folia {
+        "https://api.papermc.io/v2/projects/folia"
+    } else {
+        "https://api.papermc.io/v2/projects/paper"
+    };
+
+    let mut response = ureq::get(url).call()?;
+
+    let body = response.body_mut();
+    let text = body.read_to_string()?;
+
+    let project: PaperProjectVersions = serde_json::from_str(&text).unwrap();
+    return Ok(project);
+}

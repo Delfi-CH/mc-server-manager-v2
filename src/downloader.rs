@@ -43,6 +43,23 @@ fn main() {
             eprintln!("Could not download/install NeoForge server :{e}");
         }
     }
-    
+    println!("Downloading Paper server.jar...");
+    match download_paper_server("1.21.11".to_owned() ,env::current_dir().unwrap().to_str().unwrap().to_owned()+"/test/paper",true, false) {
+        Ok(_) => {
+            println!("Done!");
+        }
+        Err(e) => {
+            eprintln!("Could not download Paper server :{e}");
+        }
+    }
+    println!("Downloading Folia server.jar...");
+    match download_paper_server("1.21.11".to_owned() ,env::current_dir().unwrap().to_str().unwrap().to_owned()+"/test/folia",true, true) {
+        Ok(_) => {
+            println!("Done!");
+        }
+        Err(e) => {
+            eprintln!("Could not download Folia server :{e}");
+        }
+    }
 
 }
