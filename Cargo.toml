@@ -27,5 +27,6 @@ path = "src/lib.rs"
 indicatif = "0.18.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+thiserror = "2.0.17"
 ureq = {version = "3.1.4", features = ["json"]}
 
