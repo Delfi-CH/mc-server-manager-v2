@@ -2,10 +2,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::thread;
 use std::time::Duration;
-use thiserror::Error;
 
+use thiserror::Error;
 use indicatif::*;
 use serde::*;
 
