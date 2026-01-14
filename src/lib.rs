@@ -1,12 +1,15 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use clap::ValueEnum;
 use thiserror::Error;
 use indicatif::*;
 use serde::*;
+use directories::*;
 
 //
 // Core Library Stuff
@@ -24,6 +27,10 @@ pub enum LibError {
     Ver(String),
     #[error("JSON Parse error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Miscelanious Error: {0}")]
+    Misc(String),
+    #[error("Variable Error: {0}")]
+    Var(#[from] std::env::VarError),
 }
 
 
@@ -163,8 +170,9 @@ fn download_vanilla_fetch_available_vannila_versions() -> Result<MojangVersionMa
 // Forge Server
 //
 
-pub fn download_forge_server(mc_ver: String, path:String, forge_ver: String, term: bool) -> Result<(), LibError>{
-    download_forge_installer(mc_ver, path.clone(), forge_ver, term)?;
+pub fn download_forge_server(ver: String, path:String, term: bool) -> Result<(), LibError>{
+    let forge_ver = meta_get_forge_version_for_corresponding_mc_version(ver.clone())?;
+    download_forge_installer(ver, path.clone(), forge_ver, term)?;
 
     if term {
         println!("Installing Forge Server...");
@@ -254,8 +262,8 @@ fn download_forge_installer(mc_ver: String, path:String, forge_ver: String, term
 // Neoforge Server
 //
 
-pub fn download_neoforge_server(path: String, neoforge_ver: String, term: bool) -> Result<(), LibError> {
-    download_neoforge_installer(neoforge_ver, path.clone(), term)?;
+pub fn download_neoforge_server(path: String, ver: String, term: bool, neoforge_ver: String) -> Result<(), LibError> {
+    download_neoforge_installer(ver, neoforge_ver, path.clone(), term)?;
 
     if term {
         println!("Installing NeoForge Server...");
@@ -294,7 +302,8 @@ pub fn download_neoforge_server(path: String, neoforge_ver: String, term: bool) 
 
 }
 
-fn download_neoforge_installer(neoforge_ver: String, path: String, term: bool) -> Result<(), LibError>{
+fn download_neoforge_installer(_ver: String, neoforge_ver: String, path: String, term: bool) -> Result<(), LibError>{
+    println!("{}", neoforge_ver);
     let url = format!("https://maven.neoforged.net/releases/net/neoforged/neoforge/{neoforge_ver}/neoforge-{neoforge_ver}-installer.jar");
     let mut response = ureq::get(&url).call()?;
 
@@ -522,7 +531,7 @@ fn download_paper_fetch_latest_build(ver: String, folia: bool) -> Result<u32, Li
 }
 
 
-fn download_paper_fetch_versions(folia: bool) -> Result<(PaperProjectVersions), LibError> {
+fn download_paper_fetch_versions(folia: bool) -> Result<PaperProjectVersions, LibError> {
     let url = if folia {
         "https://api.papermc.io/v2/projects/folia"
     } else {
@@ -536,4 +545,148 @@ fn download_paper_fetch_versions(folia: bool) -> Result<(PaperProjectVersions), 
 
     let project: PaperProjectVersions = serde_json::from_str(&text).unwrap();
     return Ok(project);
+}
+
+//
+// Metadata
+//
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq)]
+pub enum Modloaders {
+    Vanilla,
+    Forge,
+    NeoForge,
+    Fabric,
+    Paper,
+    Folia,
+}
+ 
+pub fn meta_fetch_game_versions() -> Result<Vec<String>, LibError> {
+    let mut result: Vec<String> = Vec::new();
+    let mut response = ureq::get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+    .call()?;
+
+    let body = response.body_mut();
+    let text = body.read_to_string()?;
+
+    let manifest: MojangVersionManifest = serde_json::from_str(&text)?;
+    let versions: Vec<MojangVersionEntry> = manifest.versions;
+    for ver in versions {
+        if ver.kind == "release" {
+            result.push(ver.id);
+        }
+    }
+    Ok(result)
+}
+
+//
+// Forge Versions
+//
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ForgeMetadata {
+    #[serde(flatten, deserialize_with = "meta_forge_minecraft_versions_from_map")]
+    pub minecraft_versions: HashMap<String, ForgeMinecraftVersion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ForgeMinecraftVersion {
+    pub version: String,
+    pub builds: Vec<ForgeBuild>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ForgeBuild {
+    pub id: String,
+}
+
+fn meta_forge_minecraft_versions_from_map<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, ForgeMinecraftVersion>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let map: HashMap<String, Vec<String>> = HashMap::deserialize(deserializer)?;
+    let result = map
+        .into_iter()
+        .map(|(version, build_ids)| {
+            Ok((
+                version.clone(),
+                ForgeMinecraftVersion {
+                    version,
+                    builds: build_ids.into_iter().map(|id| ForgeBuild { id }).collect(),
+                },
+            ))
+        })
+        .collect::<Result<HashMap<_, _>, D::Error>>()?;
+    Ok(result)
+}
+
+fn meta_get_forge_version_for_corresponding_mc_version(ver: String) -> Result<String, LibError> {
+    let mut response = ureq::get("https://files.minecraftforge.net/net/minecraftforge/forge/maven-metadata.json")
+        .call()?;
+
+    let body = response.body_mut();
+    let text = body.read_to_string()?;
+    let meta: ForgeMetadata = serde_json::from_str(&text)?;
+
+    let mut builds: Vec<String> = vec![];
+
+    for (mc_version, forge_version) in &meta.minecraft_versions {
+        for build in &forge_version.builds {
+            if ver == *mc_version {
+                let build_tmp = build.id.replace(mc_version, "");
+                let build_flat = build_tmp.replace("-", "");
+                builds.push(build_flat);
+            }
+        }
+    }
+
+    Ok(builds[builds.len()-1].clone())
+}
+
+//
+// Config
+//
+
+pub struct Config {
+    pub title: String,
+    pub version: String,
+    pub directories: Directories,
+}
+
+pub struct System {
+    pub os_type: String,
+}
+
+pub struct Directories {
+    pub config_dir: String,
+    pub data_dir: String,
+    pub cache_dir: String,
+    pub home_dir: String,
+}
+
+pub fn fetch_directories() -> Directories {
+    let mut config_dir = String::new();
+    let mut data_dir = String::new();
+    let mut cache_dir = String::new();
+    let mut home_dir = String::new();
+
+    if let Some(project_dirs) = ProjectDirs::from("dev", "delfi", "MC Server Manager V2") {
+        config_dir = project_dirs.config_dir().to_string_lossy().to_string();
+        data_dir = project_dirs.data_dir().to_string_lossy().to_string();
+        cache_dir = project_dirs.cache_dir().to_string_lossy().to_string();
+    }
+
+    if let Some(user_dirs) = UserDirs::new() {
+        home_dir = user_dirs.home_dir().to_string_lossy().to_string();
+    }
+    
+    let dirs = Directories {
+        config_dir: config_dir,
+        cache_dir: cache_dir,
+        data_dir: data_dir,
+        home_dir: home_dir,
+    };
+    return dirs;
 }
