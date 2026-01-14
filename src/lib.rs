@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::ptr::null;
 use std::time::Duration;
 
 use clap::ValueEnum;
@@ -10,10 +11,14 @@ use thiserror::Error;
 use indicatif::*;
 use serde::*;
 use directories::*;
+use toml::Value;
 
 //
 // Core Library Stuff
 //
+
+pub const APP_NAME: &str = "mc-server-manager-v2";
+pub const APP_VERSION: &str = "0.0.1";
 
 #[derive(Debug, Error)]
 pub enum LibError {
@@ -649,33 +654,39 @@ fn meta_get_forge_version_for_corresponding_mc_version(ver: String) -> Result<St
 // Config
 //
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
     pub title: String,
     pub version: String,
     pub directories: Directories,
 }
 
+#[derive(Serialize)]
 pub struct System {
     pub os_type: String,
 }
 
+#[derive(Serialize, Clone, Deserialize, Debug)]
 pub struct Directories {
     pub config_dir: String,
     pub data_dir: String,
     pub cache_dir: String,
     pub home_dir: String,
+    pub server_dir: String,
 }
 
-pub fn fetch_directories() -> Directories {
+pub fn config_fetch_directories() -> Directories {
     let mut config_dir = String::new();
     let mut data_dir = String::new();
     let mut cache_dir = String::new();
     let mut home_dir = String::new();
+    let mut server_dir = String::new();
 
     if let Some(project_dirs) = ProjectDirs::from("dev", "delfi", "MC Server Manager V2") {
         config_dir = project_dirs.config_dir().to_string_lossy().to_string();
         data_dir = project_dirs.data_dir().to_string_lossy().to_string();
         cache_dir = project_dirs.cache_dir().to_string_lossy().to_string();
+        server_dir = data_dir.clone() + "/servers"
     }
 
     if let Some(user_dirs) = UserDirs::new() {
@@ -687,6 +698,74 @@ pub fn fetch_directories() -> Directories {
         cache_dir: cache_dir,
         data_dir: data_dir,
         home_dir: home_dir,
+        server_dir: server_dir,
     };
     return dirs;
+}
+
+pub fn config_create_config() -> Result<(), LibError> {
+    let dirs = config_fetch_directories(); 
+    let path = PathBuf::from(dirs.clone().config_dir + "/config.toml");
+    if !path.exists() {
+        if !PathBuf::from(dirs.clone().config_dir).exists(){
+            std::fs::create_dir(dirs.clone().config_dir)?;
+        } 
+        let config = Config {
+            title: APP_NAME.to_owned(),
+            version: APP_VERSION.to_owned(),
+            directories: Directories {
+                config_dir: dirs.config_dir,
+                data_dir: dirs.data_dir,
+                cache_dir: dirs.cache_dir,
+                home_dir: dirs.home_dir,
+                server_dir: dirs.server_dir
+            },
+        };
+        let toml_string = toml::to_string_pretty(&config)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, toml_string)?;
+    }
+    Ok(())
+}
+
+pub fn config_read_config() -> Result<Value, LibError> {
+    let dirs = config_fetch_directories(); 
+    let path = PathBuf::from(dirs.config_dir + "/config.toml");
+    let content = std::fs::read_to_string(path)?;
+    let value: Value = content
+        .parse::<Value>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok(value)
+}
+
+pub fn config_get_value<'a>(config: &'a Value, key: &str) -> Option<&'a Value> {
+    let mut current = config;
+    for part in key.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+
+pub fn config_set_value(config: &mut Value, key: &str, new_value: Value) -> Result<bool, LibError> {
+    let parts: Vec<&str> = key.split('.').collect();
+    let last = match parts.last() {
+        Some(k) => *k,
+        None => return Ok(false),
+    };
+    let mut current = config;
+    for part in &parts[..parts.len() - 1] {
+        current = current.get_mut(part).ok_or(LibError::Misc("Invalid Key".to_owned()))?;
+    }
+    current[last] = new_value;
+    Ok(true)
+}
+
+pub fn config_write_config(config: &Value) -> Result<(), LibError> {
+    let dirs = config_fetch_directories(); 
+    let path = PathBuf::from(dirs.config_dir + "/config.toml");
+    let toml_string = toml::to_string_pretty(config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(path, toml_string)?;
+    Ok(())
 }
