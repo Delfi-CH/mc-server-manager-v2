@@ -31,7 +31,7 @@ fn main() -> Result<(), LibError>{
         eprintln!("Invalid Minecraft Version!");
         std::process::exit(1);
     }
-    let mut path_str = "".to_owned();
+    let path_str;
     match args.path {
         Some(path)=>path_str = path.display().to_string(),
         None => {

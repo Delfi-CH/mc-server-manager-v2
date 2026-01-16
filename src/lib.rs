@@ -3,8 +3,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::ptr::null;
 use std::time::Duration;
+use std::fmt;
 
 use clap::ValueEnum;
 use thiserror::Error;
@@ -12,6 +12,7 @@ use indicatif::*;
 use serde::*;
 use directories::*;
 use toml::Value;
+use sha256::*;
 
 //
 // Core Library Stuff
@@ -218,7 +219,7 @@ pub fn download_forge_server(ver: String, path:String, term: bool) -> Result<(),
 }
 
 fn download_forge_installer(mc_ver: String, path:String, forge_ver: String, term: bool) -> Result<(), LibError>{
-    let mut url = "".to_owned();
+    let url;
     if mc_ver == "1.9.4" || mc_ver == "1.8.9" || mc_ver == "1.7.10"{
         url = format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{}-{}-{}/forge-{}-{}-{}-installer.jar", mc_ver, forge_ver, mc_ver, mc_ver, forge_ver, mc_ver);
     } else {
@@ -458,7 +459,7 @@ pub fn download_paper_server(ver: String, path:String, term: bool, folia: bool) 
     if build != 0 {
 
         //The Download
-        let mut downlad_url = "".to_owned();
+        let downlad_url;
         if folia {
             downlad_url = format!("https://api.papermc.io/v2/projects/folia/versions/{ver}/builds/{build}/downloads/folia-{ver}-{build}.jar");
         } else {
@@ -550,6 +551,90 @@ fn download_paper_fetch_versions(folia: bool) -> Result<PaperProjectVersions, Li
 
     let project: PaperProjectVersions = serde_json::from_str(&text).unwrap();
     return Ok(project);
+}
+
+//
+// Java Downloads
+//
+
+pub const LINUX_JAVA_8_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-8-x64-linux-jdk.tar.gz";
+pub const LINUX_JAVA_17_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-17-x64-linux-jdk.tar.gz";
+pub const LINUX_JAVA_21_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-21-x64-linux-jdk.tar.gz";
+pub const LINUX_JAVA_25_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-25-x64-linux-jdk.tar.gz";
+
+pub const LINUX_JAVA_8_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-8-x64-linux-jdk.tar.gz";
+pub const LINUX_JAVA_17_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-17-x64-linux-jdk.tar.gz";
+pub const LINUX_JAVA_21_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-21-x64-linux-jdk.tar.gz";
+pub const LINUX_JAVA_25_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-25-x64-linux-jdk.tar.gz";
+
+#[derive(Debug)]
+pub enum JavaVersion {
+    Java8,
+    Java17,
+    Java21,
+    Java25,
+}
+
+impl fmt::Display for JavaVersion {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+pub fn download_java_openjdk_amazon_correto(url: &str, hash: &str, term: bool, path: String, java_ver: JavaVersion) -> Result<(), LibError> {
+    let mut response = ureq::get(url).call()?;
+    let size = response.body().content_length().unwrap_or(0);
+        
+    let mut reader = response.body_mut().as_reader();
+    let save_path = Path::new(&path).join(java_ver.to_string()+"/java.tar.gz");
+    let mut java_tar = File::create(save_path)?;
+
+    let progress = if term {
+        Some(ProgressBar::new(size))
+    } else {
+        None
+    };        
+
+    if let Some(pb) = &progress {
+        pb.set_style(
+            ProgressStyle::default_bar()
+            .template(
+                "{bar:80.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec}, {eta})"
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+    }
+
+    let mut buffer = [0u8; 8 * 1024];
+    loop {
+        let n = reader.read(&mut buffer).unwrap();
+        if n == 0 {
+            break;
+        }
+        java_tar.write_all(&buffer[..n]).unwrap();
+        if let Some(pb) = &progress {
+            pb.inc(n as u64);
+        }
+    }
+
+    if term {
+        println!("Verifying Integrety...");
+    }
+
+    let mut sha_response = ureq::get(hash).call()?;
+    let sha_body = sha_response.body_mut();
+    let downloaded_hash = sha_body.read_to_string()?;
+    let local_hash = try_digest(Path::new(&path).join(java_ver.to_string()+"/java.tar.gz"))?;
+    if downloaded_hash == local_hash {
+        if term {
+            println!("Done!");
+        }        
+    } else {
+        LibError::Misc("Could not verify the Integrety of the file!".to_owned());
+    }
+    Ok(())
+
 }
 
 //
@@ -659,6 +744,7 @@ pub struct Config {
     pub title: String,
     pub version: String,
     pub directories: Directories,
+    pub java_paths: JavaPaths,
 }
 
 #[derive(Serialize)]
@@ -673,6 +759,15 @@ pub struct Directories {
     pub cache_dir: String,
     pub home_dir: String,
     pub server_dir: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JavaPaths {
+    // All of these must point to the java binary
+    pub java8_path: PathBuf,
+    pub java17_path: PathBuf,
+    pub java21_path: PathBuf,
+    pub java25_path: PathBuf,
 }
 
 pub fn config_fetch_directories() -> Directories {
@@ -720,6 +815,7 @@ pub fn config_create_config() -> Result<(), LibError> {
                 home_dir: dirs.home_dir,
                 server_dir: dirs.server_dir
             },
+            java_paths: JavaPaths { java8_path: PathBuf::new(), java17_path: PathBuf::new(), java21_path: PathBuf::new(), java25_path: PathBuf::new() }
         };
         let toml_string = toml::to_string_pretty(&config)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -769,3 +865,7 @@ pub fn config_write_config(config: &Value) -> Result<(), LibError> {
     std::fs::write(path, toml_string)?;
     Ok(())
 }
+
+//
+// Server Structs
+//
