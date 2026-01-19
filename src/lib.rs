@@ -14,6 +14,7 @@ use directories::*;
 use sha256::*;
 use flate2::read::GzDecoder;
 use tar::Archive;
+use zip::ZipArchive;
 
 //
 // Core Library Stuff
@@ -38,6 +39,8 @@ pub enum LibError {
     Misc(String),
     #[error("Variable Error: {0}")]
     Var(#[from] std::env::VarError),
+    #[error("Zip Error: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 
@@ -572,6 +575,16 @@ pub const LINUX_JAVA_17_SHA256: &str = "https://corretto.aws/downloads/latest_sh
 pub const LINUX_JAVA_21_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-21-x64-linux-jdk.tar.gz";
 pub const LINUX_JAVA_25_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-25-x64-linux-jdk.tar.gz";
 
+pub const WINDOWS_JAVA_8_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-8-x64-windows-jdk.zip";
+pub const WINDOWS_JAVA_17_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-17-x64-windows-jdk.zip";
+pub const WINDOWS_JAVA_21_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-21-x64-windows-jdk.zip";
+pub const WINDOWS_JAVA_25_URL: &str = "https://corretto.aws/downloads/latest/amazon-corretto-25-x64-windows-jdk.zip";
+
+pub const WINDOWS_JAVA_8_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-8-x64-windows-jdk.zip";
+pub const WINDOWS_JAVA_17_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-17-x64-windows-jdk.zip";
+pub const WINDOWS_JAVA_21_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-21-x64-windows-jdk.zip";
+pub const WINDOWS_JAVA_25_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-25-x64-windows-jdk.zip";
+
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq)]
 pub enum JavaVersion {
     Java8,
@@ -668,6 +681,9 @@ pub fn download_java_openjdk_amazon_correto(url: &str, hash: &str, term: bool, p
     #[cfg(target_os = "linux")]
     download_java_unpack_targz(save_path, path_path)?;
 
+    #[cfg(target_os = "windows")]
+    download_java_unpack_zip(save_path, path_path)?;
+
     if let Some (spinner) = &spinner {
         spinner.finish();
         println!("Done!");
@@ -693,6 +709,42 @@ fn download_java_unpack_targz(targz_path: PathBuf, save_path: PathBuf) -> Result
         entry.unpack(save_path.join(stripped))?;
     }
     fs::remove_file(targz_path)?;
+    Ok(())
+}
+
+fn download_java_unpack_zip(zip_path: PathBuf, save_path: PathBuf) -> Result<(), LibError> {
+    let file = File::open(&zip_path)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+
+        // Skip directories
+        let path = match entry.enclosed_name() {
+            Some(path) => path,
+            None => continue, // security: skip paths with traversal
+        };
+
+        // Strip the top-level directory
+        let stripped: PathBuf = path.components().skip(1).collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+
+        let out_path = save_path.join(&stripped);
+
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut outfile = File::create(&out_path)?;
+            std::io::copy(&mut entry, &mut outfile)?;
+        }
+    }
+
+    fs::remove_file(zip_path)?;
     Ok(())
 }
 

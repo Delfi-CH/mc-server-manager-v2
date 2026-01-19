@@ -59,7 +59,10 @@ fn main() -> Result<(), LibError>{
             eprintln!("Java 17 was not found!");
             eprintln!("Downloading Java 17...");
             let java_dir = config.directories.java_dir;
+            #[cfg(target_os = "linux")]
             download_java_openjdk_amazon_correto(LINUX_JAVA_17_URL, LINUX_JAVA_17_SHA256, true, java_dir, JavaVersion::Java17)?;
+            #[cfg(target_os = "windows")]
+            download_java_openjdk_amazon_correto(WINDOWS_JAVA_17_URL, WINDOWS_JAVA_17_SHA256, true, java_dir, JavaVersion::Java17)?;
         }
     }
 
