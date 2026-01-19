@@ -25,6 +25,9 @@ struct Args {
 
 
 fn main() -> Result<(), LibError>{
+    println!("Beginning Download...");
+    config_create_config()?;
+    let config = config_read_config()?;
     let args = Args::parse();
     let versions = meta_fetch_game_versions()?;
     if !versions.contains(&args.mcversion){
@@ -49,6 +52,17 @@ fn main() -> Result<(), LibError>{
             }
         }
     }
+
+    match config_collect_java_bin_path(JavaVersion::Java17) {
+        Ok(_) => println!("Found Java 17..."),
+        Err(_) => {
+            eprintln!("Java 17 was not found!");
+            eprintln!("Downloading Java 17...");
+            let java_dir = config.directories.java_dir;
+            download_java_openjdk_amazon_correto(LINUX_JAVA_17_URL, LINUX_JAVA_17_SHA256, true, java_dir, JavaVersion::Java17)?;
+        }
+    }
+
     match args.modloader {
         Modloaders::Vanilla => wrap_download_vanilla_server(args.mcversion, path_str),
         Modloaders::Forge => wrap_download_forge_server(args.mcversion, path_str),

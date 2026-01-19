@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,8 +11,9 @@ use thiserror::Error;
 use indicatif::*;
 use serde::*;
 use directories::*;
-use toml::Value;
 use sha256::*;
+use flate2::read::GzDecoder;
+use tar::Archive;
 
 //
 // Core Library Stuff
@@ -200,7 +201,9 @@ pub fn download_forge_server(ver: String, path:String, term: bool) -> Result<(),
         );
     }
 
-    let mut child = Command::new("java")
+    let java_cmd = config_collect_java_bin_path(JavaVersion::Java17)?;
+
+    let mut child = Command::new(java_cmd)
     .args(["-jar", "installer.jar", "--installServer"])
     .current_dir(path)
     .stdin(Stdio::null())
@@ -290,8 +293,9 @@ pub fn download_neoforge_server(path: String, ver: String, term: bool, neoforge_
             .unwrap(),
         );
     }
-    
-    let mut child = Command::new("java")
+    let java_cmd = config_collect_java_bin_path(JavaVersion::Java17)?;
+
+    let mut child = Command::new(java_cmd)
     .args(["-jar", "installer.jar", "--installServer"])
     .current_dir(path)
     .stdin(Stdio::null())
@@ -375,8 +379,9 @@ pub fn download_fabric_server(mc_ver: String, path: String, term: bool) -> Resul
             .unwrap(),
         );
     }
+    let java_cmd = config_collect_java_bin_path(JavaVersion::Java17)?;
 
-    let mut child = Command::new("java")
+    let mut child = Command::new(java_cmd)
     .args(["-jar", "installer.jar", "server", "-mcversion", &mc_ver, "-dir", &path])
     .current_dir(path)
     .stdin(Stdio::null())
@@ -567,7 +572,7 @@ pub const LINUX_JAVA_17_SHA256: &str = "https://corretto.aws/downloads/latest_sh
 pub const LINUX_JAVA_21_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-21-x64-linux-jdk.tar.gz";
 pub const LINUX_JAVA_25_SHA256: &str = "https://corretto.aws/downloads/latest_sha256/amazon-corretto-25-x64-linux-jdk.tar.gz";
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq)]
 pub enum JavaVersion {
     Java8,
     Java17,
@@ -582,12 +587,18 @@ impl fmt::Display for JavaVersion {
 }
 
 pub fn download_java_openjdk_amazon_correto(url: &str, hash: &str, term: bool, path: String, java_ver: JavaVersion) -> Result<(), LibError> {
+
+    let path_path = PathBuf::from(&path).join(java_ver.to_string());
+    if !path_path.exists() {
+        fs::create_dir_all(path_path.clone())?;
+    }
+
     let mut response = ureq::get(url).call()?;
     let size = response.body().content_length().unwrap_or(0);
         
     let mut reader = response.body_mut().as_reader();
     let save_path = Path::new(&path).join(java_ver.to_string()+"/java.tar.gz");
-    let mut java_tar = File::create(save_path)?;
+    let mut java_tar = File::create(save_path.clone())?;
 
     let progress = if term {
         Some(ProgressBar::new(size))
@@ -633,8 +644,56 @@ pub fn download_java_openjdk_amazon_correto(url: &str, hash: &str, term: bool, p
     } else {
         LibError::Misc("Could not verify the Integrety of the file!".to_owned());
     }
+
+    if term {
+        println!("Extracting Archive...");
+    }
+
+    let spinner = if term {
+            Some(ProgressBar::new_spinner())
+        } else {
+            None
+    };
+
+    if let Some (spinner) = &spinner {
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+            .tick_chars("|/-\\")
+            .template("{spinner} {msg}")
+            .unwrap(),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    download_java_unpack_targz(save_path, path_path)?;
+
+    if let Some (spinner) = &spinner {
+        spinner.finish();
+        println!("Done!");
+    }
     Ok(())
 
+}
+
+fn download_java_unpack_targz(targz_path: PathBuf, save_path: PathBuf) -> Result<(), LibError> {
+    let targz = File::open(targz_path.clone())?;
+    let tar = GzDecoder::new(targz);
+    let mut archive =Archive::new(tar);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+
+        let path = entry.path()?;
+        let stripped: PathBuf = path.components().skip(1).collect();
+
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+
+        entry.unpack(save_path.join(stripped))?;
+    }
+    fs::remove_file(targz_path)?;
+    Ok(())
 }
 
 //
@@ -744,7 +803,6 @@ pub struct Config {
     pub title: String,
     pub version: String,
     pub directories: Directories,
-    pub java_paths: JavaPaths,
 }
 
 #[derive(Serialize)]
@@ -759,18 +817,10 @@ pub struct Directories {
     pub cache_dir: String,
     pub home_dir: String,
     pub server_dir: String,
+    pub java_dir: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct JavaPaths {
-    // All of these must point to the java binary
-    pub java8_path: PathBuf,
-    pub java17_path: PathBuf,
-    pub java21_path: PathBuf,
-    pub java25_path: PathBuf,
-}
-
-pub fn config_fetch_directories() -> Directories {
+fn config_fetch_directories() -> Directories {
     let mut config_dir = String::new();
     let mut data_dir = String::new();
     let mut cache_dir = String::new();
@@ -791,20 +841,24 @@ pub fn config_fetch_directories() -> Directories {
     let dirs = Directories {
         config_dir: config_dir,
         cache_dir: cache_dir,
-        data_dir: data_dir,
+        data_dir: data_dir.clone(),
         home_dir: home_dir,
         server_dir: server_dir,
+        java_dir: data_dir + "/java"
     };
     return dirs;
 }
 
 pub fn config_create_config() -> Result<(), LibError> {
-    let dirs = config_fetch_directories(); 
-    let path = PathBuf::from(dirs.clone().config_dir + "/config.toml");
+    let dirs = config_fetch_directories();
+    let config_dir = PathBuf::from(&dirs.config_dir);
+    let path = config_dir.join("config.toml");
+
     if !path.exists() {
-        if !PathBuf::from(dirs.clone().config_dir).exists(){
-            std::fs::create_dir(dirs.clone().config_dir)?;
-        } 
+        if !config_dir.exists() {
+            std::fs::create_dir_all(&config_dir)?;
+        }
+
         let config = Config {
             title: APP_NAME.to_owned(),
             version: APP_VERSION.to_owned(),
@@ -813,58 +867,55 @@ pub fn config_create_config() -> Result<(), LibError> {
                 data_dir: dirs.data_dir,
                 cache_dir: dirs.cache_dir,
                 home_dir: dirs.home_dir,
-                server_dir: dirs.server_dir
+                server_dir: dirs.server_dir,
+                java_dir: dirs.java_dir,
             },
-            java_paths: JavaPaths { java8_path: PathBuf::new(), java17_path: PathBuf::new(), java21_path: PathBuf::new(), java25_path: PathBuf::new() }
         };
-        let toml_string = toml::to_string_pretty(&config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(path, toml_string)?;
+
+        config_write_config(&config)?;
     }
+
     Ok(())
 }
 
-pub fn config_read_config() -> Result<Value, LibError> {
-    let dirs = config_fetch_directories(); 
-    let path = PathBuf::from(dirs.config_dir + "/config.toml");
+pub fn config_read_config() -> Result<Config, LibError> {
+    let dirs = config_fetch_directories();
+    let path = PathBuf::from(dirs.config_dir).join("config.toml");
+
     let content = std::fs::read_to_string(path)?;
-    let value: Value = content
-        .parse::<Value>()
+    let config: Config = toml::from_str(&content)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    Ok(value)
+
+    Ok(config)
 }
 
-pub fn config_get_value<'a>(config: &'a Value, key: &str) -> Option<&'a Value> {
-    let mut current = config;
-    for part in key.split('.') {
-        current = current.get(part)?;
-    }
-    Some(current)
-}
+pub fn config_write_config(config: &Config) -> Result<(), LibError> {
+    let dirs = config_fetch_directories();
+    let path = PathBuf::from(dirs.config_dir).join("config.toml");
 
-
-pub fn config_set_value(config: &mut Value, key: &str, new_value: Value) -> Result<bool, LibError> {
-    let parts: Vec<&str> = key.split('.').collect();
-    let last = match parts.last() {
-        Some(k) => *k,
-        None => return Ok(false),
-    };
-    let mut current = config;
-    for part in &parts[..parts.len() - 1] {
-        current = current.get_mut(part).ok_or(LibError::Misc("Invalid Key".to_owned()))?;
-    }
-    current[last] = new_value;
-    Ok(true)
-}
-
-pub fn config_write_config(config: &Value) -> Result<(), LibError> {
-    let dirs = config_fetch_directories(); 
-    let path = PathBuf::from(dirs.config_dir + "/config.toml");
     let toml_string = toml::to_string_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
     std::fs::write(path, toml_string)?;
     Ok(())
 }
+
+pub fn config_collect_java_bin_path(java_ver: JavaVersion) -> Result<String, LibError> {
+    let config = config_read_config()?;
+    let java_base_dir = config.directories.java_dir;
+    let ver_path = PathBuf::from(&java_base_dir).join(java_ver.to_string()).join("bin").join("java");
+    match Command::new(ver_path.clone())
+    .arg("-version")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status() 
+    {
+        Ok(_) => return Ok(ver_path.to_string_lossy().to_string()),
+        Err(e) => return Err(LibError::Io(e))
+    }
+}
+
 
 //
 // Server Structs
